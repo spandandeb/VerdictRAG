@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { 
   Upload, 
   Search, 
@@ -11,102 +11,221 @@ import {
   ExternalLink,
   Loader2,
   CheckCircle,
-  XCircle
+  XCircle,
+  Database,
+  Zap,
+  Activity
 } from 'lucide-react';
 
 const VerdictRAG = () => {
   const [activeTab, setActiveTab] = useState('upload');
   const [uploadedFile, setUploadedFile] = useState(null);
-  const [caseUrl, setCaseUrl] = useState('');
-  const [caseText, setCaseText] = useState('');
   const [analysis, setAnalysis] = useState(null);
   const [chatMessages, setChatMessages] = useState([]);
   const [chatInput, setChatInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
+  const [error, setError] = useState(null);
+  const [backendHealth, setBackendHealth] = useState(null);
+  const [documentStats, setDocumentStats] = useState(null);
+  const [chunks, setChunks] = useState(null);
   const fileInputRef = useRef(null);
 
-  // Mock API calls - replace with actual Flask backend calls
-  const uploadFile = async (file) => {
-    setLoading(true);
-    // Simulate API call
-    setTimeout(() => {
-      setAnalysis({
-        title: "Brown v. Board of Education of Topeka",
-        summary: "This landmark case declared state laws establishing separate public schools for black and white students to be unconstitutional, overturning the 'separate but equal' doctrine.",
-        verdict: "The Supreme Court unanimously ruled that segregated public schools are unconstitutional under the Equal Protection Clause of the 14th Amendment.",
-        implications: [
-          "Ended legal segregation in public schools",
-          "Paved the way for the Civil Rights Movement",
-          "Established precedent for challenging discriminatory laws"
-        ],
-        legalTerms: [
-          { term: "Equal Protection Clause", definition: "Part of the 14th Amendment that requires states to provide equal protection under the law to all people" },
-          { term: "Precedent", definition: "A legal principle established in a previous court case that guides future decisions" }
-        ]
-      });
-      setLoading(false);
-    }, 2000);
+  // Backend API base URL
+  const API_BASE_URL = 'http://localhost:5000';
+
+  // Check backend health
+  const checkBackendHealth = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/health`);
+      const health = await response.json();
+      setBackendHealth(health);
+      console.log('Backend Health:', health);
+      return health;
+    } catch (error) {
+      console.error('Backend not available:', error);
+      setError('Backend server is not running. Please start the Flask server on port 5000.');
+      return null;
+    }
   };
 
-  const handleFileUpload = (event) => {
+  // Upload and process document with RAG
+  const handleFileUpload = async (event) => {
     const file = event.target.files[0];
-    if (file) {
-      setUploadedFile(file);
-      uploadFile(file);
-    }
-  };
+    if (!file) return;
 
-  const handleUrlSubmit = async () => {
-    if (caseUrl) {
-      setLoading(true);
-      // Simulate API call for URL processing
-      setTimeout(() => {
-        setAnalysis({
-          title: "Case from URL: " + caseUrl,
-          summary: "Analysis of the case from the provided URL...",
-          verdict: "Court ruling extracted from the document...",
-          implications: ["Implication 1", "Implication 2"],
-          legalTerms: [{ term: "Sample Term", definition: "Sample definition" }]
-        });
-        setLoading(false);
-      }, 2000);
+    // Validate file type
+    if (file.type !== 'application/pdf') {
+      setError('Please upload a PDF file');
+      return;
     }
-  };
 
-  const handleTextSubmit = async () => {
-    if (caseText) {
-      setLoading(true);
-      // Simulate API call for text processing
-      setTimeout(() => {
-        setAnalysis({
-          title: "Direct Text Analysis",
-          summary: "Analysis of the provided case text...",
-          verdict: "Court ruling extracted from the text...",
-          implications: ["Implication 1", "Implication 2"],
-          legalTerms: [{ term: "Sample Term", definition: "Sample definition" }]
-        });
-        setLoading(false);
-      }, 2000);
+    // Validate file size (max 10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      setError('File size must be less than 10MB');
+      return;
     }
-  };
 
-  const handleChatSubmit = async () => {
-    if (chatInput.trim()) {
-      const userMessage = { type: 'user', content: chatInput };
-      setChatMessages(prev => [...prev, userMessage]);
-      setChatInput('');
+    setUploadedFile(file);
+    setError(null);
+    setLoading(true);
+    
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const response = await fetch(`${API_BASE_URL}/upload`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const result = await response.json();
       
-      // Simulate AI response
-      setTimeout(() => {
-        const aiMessage = { 
-          type: 'ai', 
-          content: `Based on the case analysis, here's what I found regarding your question: "${chatInput}". This relates to the legal principles established in the case...` 
-        };
-        setChatMessages(prev => [...prev, aiMessage]);
-      }, 1500);
+      if (result.error) {
+        throw new Error(result.error);
+      }
+
+      // Store document stats and case info
+      setDocumentStats(result.document_stats);
+      
+      // Set basic analysis info
+      setAnalysis({
+        title: result.case_info?.title || 'Legal Document',
+        caseInfo: result.case_info,
+        processingStatus: result.message,
+        ragStatus: result.rag_status,
+        documentStats: result.document_stats
+      });
+
+      // Switch to analysis tab
+      setActiveTab('analysis');
+      
+    } catch (error) {
+      setError(`Upload failed: ${error.message}`);
+    } finally {
+      setLoading(false);
     }
   };
+
+  // Perform comprehensive analysis using RAG
+  const handleComprehensiveAnalysis = async () => {
+    if (!uploadedFile || !documentStats) {
+      setError('Please upload a document first');
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/analyze`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const result = await response.json();
+      
+      if (result.error) {
+        throw new Error(result.error);
+      }
+
+      // Update analysis with comprehensive results
+      setAnalysis(prev => ({
+        ...prev,
+        comprehensiveAnalysis: result.comprehensive_analysis,
+        system: result.system,
+        documentStats: result.document_stats
+      }));
+
+    } catch (error) {
+      setError(`Analysis failed: ${error.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Get chunks information
+  const getChunksInfo = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/chunks`);
+      const result = await response.json();
+      
+      if (result.error) {
+        throw new Error(result.error);
+      }
+
+      setChunks(result);
+    } catch (error) {
+      console.error('Failed to get chunks info:', error);
+    }
+  };
+
+  // Handle RAG query (chat with document)
+  const handleChatSubmit = async () => {
+    if (!chatInput.trim()) return;
+
+    if (!documentStats) {
+      setError('Please upload and process a document first to ask questions');
+      return;
+    }
+
+    const userMessage = { type: 'user', content: chatInput };
+    setChatMessages(prev => [...prev, userMessage]);
+    const currentInput = chatInput;
+    setChatInput('');
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/query`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          question: currentInput,
+          k: 5 // Number of chunks to retrieve
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const result = await response.json();
+      
+      if (result.error) {
+        throw new Error(result.error);
+      }
+
+      const aiMessage = { 
+        type: 'ai', 
+        content: result.answer,
+        confidence: result.confidence,
+        metadata: result.rag_metadata
+      };
+      setChatMessages(prev => [...prev, aiMessage]);
+
+    } catch (error) {
+      const errorMessage = { 
+        type: 'ai', 
+        content: `Sorry, I encountered an error: ${error.message}` 
+      };
+      setChatMessages(prev => [...prev, errorMessage]);
+    }
+  };
+
+  // Component initialization
+  useEffect(() => {
+    checkBackendHealth();
+  }, []);
 
   const TabButton = ({ id, icon: Icon, label, isActive, onClick }) => (
     <button
@@ -132,54 +251,84 @@ const VerdictRAG = () => {
               <Scale className="text-white" size={32} />
               <div>
                 <h1 className="text-2xl font-bold text-white">VerdictRAG</h1>
-                <p className="text-blue-100 text-sm">AI-Powered Case Law Explainer</p>
+                <p className="text-blue-100 text-sm">AI-Powered Legal Document Analysis with RAG</p>
               </div>
             </div>
             <div className="text-white text-right">
-              <p className="text-sm opacity-75">Making Legal Judgments</p>
-              <p className="text-sm opacity-75">Accessible to Everyone</p>
+              <div className="flex items-center gap-2 mb-1">
+                <Activity size={16} />
+                <p className="text-sm">
+                  {backendHealth ? 'Connected' : 'Disconnected'}
+                </p>
+              </div>
+              {backendHealth && (
+                <p className="text-xs opacity-75">{backendHealth.version}</p>
+              )}
             </div>
           </div>
         </div>
       </div>
 
       <div className="px-6 py-8 w-full">
+        {/* Error Display */}
+        {error && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6 flex items-center gap-2">
+            <XCircle className="text-red-500" size={20} />
+            <span className="text-red-700">{error}</span>
+            <button 
+              onClick={() => setError(null)}
+              className="ml-auto text-red-500 hover:text-red-700"
+            >
+              ×
+            </button>
+          </div>
+        )}
+
+        {/* Backend Status */}
+        {backendHealth && (
+          <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-6">
+            <div className="flex items-center gap-2 mb-2">
+              <CheckCircle className="text-green-500" size={20} />
+              <span className="text-green-700 font-medium">RAG System Online</span>
+            </div>
+            <div className="text-sm text-green-600 grid grid-cols-2 md:grid-cols-4 gap-2">
+              <div>Embeddings: {backendHealth.models.sentence_model ? '✅' : '❌'}</div>
+              <div>QA Model: {backendHealth.models.qa_model ? '✅' : '❌'}</div>
+              <div>Vector Store: {backendHealth.models.vector_store ? '✅' : '❌'}</div>
+              <div>Chunks: {backendHealth.document_status.chunks_loaded}</div>
+            </div>
+          </div>
+        )}
+
         {/* Navigation Tabs */}
         <div className="bg-white/95 backdrop-blur-sm rounded-2xl p-6 mb-8 shadow-xl w-full">
           <div className="flex flex-wrap gap-2 mb-6 w-full">
             <TabButton 
               id="upload" 
               icon={Upload} 
-              label="Upload Case" 
+              label="Upload Document" 
               isActive={activeTab === 'upload'} 
-              onClick={setActiveTab} 
-            />
-            <TabButton 
-              id="search" 
-              icon={Search} 
-              label="Search Cases" 
-              isActive={activeTab === 'search'} 
               onClick={setActiveTab} 
             />
             <TabButton 
               id="analysis" 
               icon={FileText} 
-              label="Case Analysis" 
+              label="RAG Analysis" 
               isActive={activeTab === 'analysis'} 
               onClick={setActiveTab} 
             />
             <TabButton 
               id="chat" 
               icon={MessageCircle} 
-              label="Ask Questions" 
+              label="Query Document" 
               isActive={activeTab === 'chat'} 
               onClick={setActiveTab} 
             />
             <TabButton 
-              id="glossary" 
-              icon={Book} 
-              label="Legal Terms" 
-              isActive={activeTab === 'glossary'} 
+              id="chunks" 
+              icon={Database} 
+              label="Document Chunks" 
+              isActive={activeTab === 'chunks'} 
               onClick={setActiveTab} 
             />
           </div>
@@ -195,142 +344,125 @@ const VerdictRAG = () => {
                   type="file"
                   ref={fileInputRef}
                   onChange={handleFileUpload}
-                  accept=".pdf,.doc,.docx,.txt"
+                  accept=".pdf"
                   className="hidden"
                 />
                 <Upload className="mx-auto text-gray-400 mb-4" size={48} />
-                <p className="text-lg text-gray-600 mb-2">Upload PDF, DOC, or TXT file</p>
+                <p className="text-lg text-gray-600 mb-2">Upload PDF file (Max 10MB)</p>
+                <p className="text-sm text-gray-500 mb-4">Supports legal documents, case laws, contracts</p>
                 <button
                   onClick={() => fileInputRef.current?.click()}
-                  className="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition-colors"
+                  disabled={loading}
+                  className="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 flex items-center gap-2 mx-auto"
                 >
-                  Choose File
+                  {loading ? (
+                    <>
+                      <Loader2 className="animate-spin" size={16} />
+                      Processing with RAG...
+                    </>
+                  ) : (
+                    'Choose PDF File'
+                  )}
                 </button>
                 {uploadedFile && (
                   <p className="mt-2 text-green-600 font-medium">{uploadedFile.name}</p>
                 )}
               </div>
 
-              {/* URL Input */}
-              <div className="bg-gray-50 rounded-xl p-6 w-full">
-                <h3 className="text-lg font-semibold mb-3">Or enter case URL</h3>
-                <div className="flex gap-3 w-full">
-                  <input
-                    type="url"
-                    value={caseUrl}
-                    onChange={(e) => setCaseUrl(e.target.value)}
-                    placeholder="https://example.com/case-document"
-                    className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-full"
-                  />
-                  <button
-                    onClick={handleUrlSubmit}
-                    className="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition-colors flex-shrink-0"
-                  >
-                    Process URL
-                  </button>
+              {/* Document Processing Status */}
+              {documentStats && (
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-6">
+                  <h3 className="text-lg font-semibold text-blue-800 mb-3 flex items-center gap-2">
+                    <Database size={20} />
+                    Document Processed with RAG
+                  </h3>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                    <div>
+                      <p className="text-blue-600 font-medium">Characters</p>
+                      <p className="text-blue-800">{documentStats.total_characters?.toLocaleString()}</p>
+                    </div>
+                    <div>
+                      <p className="text-blue-600 font-medium">Words</p>
+                      <p className="text-blue-800">{documentStats.total_words?.toLocaleString()}</p>
+                    </div>
+                    <div>
+                      <p className="text-blue-600 font-medium">Chunks</p>
+                      <p className="text-blue-800">{documentStats.total_chunks}</p>
+                    </div>
+                    <div>
+                      <p className="text-blue-600 font-medium">Embeddings</p>
+                      <p className="text-blue-800">{documentStats.embedding_dimension}D</p>
+                    </div>
+                  </div>
+                  <div className="mt-4 flex gap-3">
+                    <button
+                      onClick={handleComprehensiveAnalysis}
+                      disabled={loading}
+                      className="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 flex items-center gap-2"
+                    >
+                      <Zap size={16} />
+                      Comprehensive Analysis
+                    </button>
+                    <button
+                      onClick={getChunksInfo}
+                      className="bg-gray-600 text-white px-4 py-2 rounded-lg hover:bg-gray-700 transition-colors flex items-center gap-2"
+                    >
+                      <Database size={16} />
+                      View Chunks
+                    </button>
+                  </div>
                 </div>
-              </div>
-
-              {/* Text Input */}
-              <div className="bg-gray-50 rounded-xl p-6 w-full">
-                <h3 className="text-lg font-semibold mb-3">Or paste case text directly</h3>
-                <textarea
-                  value={caseText}
-                  onChange={(e) => setCaseText(e.target.value)}
-                  rows={6}
-                  placeholder="Paste the legal document text here..."
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-                <button
-                  onClick={handleTextSubmit}
-                  className="mt-3 bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition-colors"
-                >
-                  Analyze Text
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Search Tab */}
-          {activeTab === 'search' && (
-            <div className="space-y-6 w-full">
-              <h2 className="text-2xl font-bold text-gray-800 mb-4">Search Case Database</h2>
-              <div className="flex gap-3 w-full">
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search for cases, keywords, or legal concepts..."
-                  className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-full"
-                />
-                <button className="bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-colors flex-shrink-0">
-                  <Search size={20} />
-                </button>
-              </div>
-              <div className="text-center text-gray-500 py-8">
-                Enter a search term to find relevant cases
-              </div>
+              )}
             </div>
           )}
 
           {/* Analysis Tab */}
           {activeTab === 'analysis' && (
             <div className="space-y-6 w-full">
-              <h2 className="text-2xl font-bold text-gray-800 mb-4">Case Analysis</h2>
+              <h2 className="text-2xl font-bold text-gray-800 mb-4">RAG-Powered Analysis</h2>
               
               {loading && (
                 <div className="text-center py-12">
                   <Loader2 className="animate-spin mx-auto text-blue-600 mb-4" size={48} />
-                  <p className="text-gray-600">Analyzing case document...</p>
+                  <p className="text-gray-600">Performing comprehensive RAG analysis...</p>
+                  <p className="text-gray-500 text-sm mt-2">Retrieving relevant chunks and generating insights</p>
                 </div>
               )}
 
-              {analysis && !loading && (
+              {analysis?.comprehensiveAnalysis && !loading && (
                 <div className="space-y-6 w-full">
-                  {/* Case Title */}
+                  {/* System Info */}
                   <div className="bg-blue-50 border-l-4 border-blue-600 p-6 rounded-r-xl w-full">
                     <h3 className="text-xl font-bold text-blue-900">{analysis.title}</h3>
+                    <p className="text-blue-700 text-sm mt-1">
+                      Analyzed by {analysis.system} • {analysis.documentStats?.total_chunks} chunks processed
+                    </p>
                   </div>
 
-                  {/* Summary */}
-                  <div className="bg-white border border-gray-200 rounded-xl p-6 w-full">
-                    <h4 className="text-lg font-semibold text-gray-800 mb-3 flex items-center gap-2">
-                      <FileText size={20} />
-                      Case Summary
-                    </h4>
-                    <p className="text-gray-700 leading-relaxed">{analysis.summary}</p>
-                  </div>
-
-                  {/* Verdict */}
-                  <div className="bg-green-50 border border-green-200 rounded-xl p-6 w-full">
-                    <h4 className="text-lg font-semibold text-green-800 mb-3 flex items-center gap-2">
-                      <CheckCircle size={20} />
-                      Court Verdict
-                    </h4>
-                    <p className="text-green-700 leading-relaxed">{analysis.verdict}</p>
-                  </div>
-
-                  {/* Implications */}
-                  <div className="bg-orange-50 border border-orange-200 rounded-xl p-6 w-full">
-                    <h4 className="text-lg font-semibold text-orange-800 mb-3 flex items-center gap-2">
-                      <AlertCircle size={20} />
-                      Real-World Implications
-                    </h4>
-                    <ul className="space-y-2">
-                      {analysis.implications.map((implication, index) => (
-                        <li key={index} className="text-orange-700 flex items-start gap-2">
-                          <span className="w-2 h-2 bg-orange-400 rounded-full mt-2 flex-shrink-0"></span>
-                          {implication}
-                        </li>
-                      ))}
-                    </ul>
+                  {/* Analysis Results */}
+                  <div className="space-y-4">
+                    {Object.entries(analysis.comprehensiveAnalysis).map(([key, value]) => (
+                      <div key={key} className="bg-white border border-gray-200 rounded-xl p-6 w-full">
+                        <h4 className="text-lg font-semibold text-gray-800 mb-3 flex items-center gap-2">
+                          <FileText size={20} />
+                          {value.question}
+                        </h4>
+                        <p className="text-gray-700 leading-relaxed mb-3">{value.answer}</p>
+                        <div className="flex items-center justify-between text-sm text-gray-500">
+                          <span>Confidence: {(value.confidence * 100).toFixed(1)}%</span>
+                          <span>Sources: {value.sources?.length || 0} chunks</span>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
 
               {!analysis && !loading && (
                 <div className="text-center py-12 text-gray-500">
-                  Upload or process a case document to see the analysis
+                  <FileText size={48} className="mx-auto mb-4 opacity-50" />
+                  <p>Upload a legal document to see RAG-powered analysis</p>
+                  <p className="text-sm mt-2">Supports PDF files with semantic search and retrieval</p>
                 </div>
               )}
             </div>
@@ -339,15 +471,18 @@ const VerdictRAG = () => {
           {/* Chat Tab */}
           {activeTab === 'chat' && (
             <div className="space-y-6 w-full">
-              <h2 className="text-2xl font-bold text-gray-800 mb-4">Ask Questions About the Case</h2>
+              <h2 className="text-2xl font-bold text-gray-800 mb-4">Query Document with RAG</h2>
               
               {/* Chat Messages */}
               <div className="bg-gray-50 rounded-xl p-6 h-96 overflow-y-auto w-full">
                 {chatMessages.length === 0 ? (
                   <div className="text-center text-gray-500 mt-20">
                     <MessageCircle size={48} className="mx-auto mb-4 opacity-50" />
-                    <p>Ask any questions about the legal case</p>
-                    <p className="text-sm">Examples: "What was the main issue?", "How does this affect citizens?"</p>
+                    <p>Ask questions about your legal document</p>
+                    <p className="text-sm">RAG will retrieve relevant sections and provide contextual answers</p>
+                    {!documentStats && (
+                      <p className="text-sm text-orange-600 mt-2">Upload and process a document first</p>
+                    )}
                   </div>
                 ) : (
                   <div className="space-y-4">
@@ -363,7 +498,13 @@ const VerdictRAG = () => {
                               : 'bg-white border border-gray-200 text-gray-800'
                           }`}
                         >
-                          {message.content}
+                          <p>{message.content}</p>
+                          {message.confidence && (
+                            <p className="text-xs mt-1 opacity-75">
+                              Confidence: {(message.confidence * 100).toFixed(1)}% | 
+                              Sources: {message.metadata?.source_chunks_used || 0}
+                            </p>
+                          )}
                         </div>
                       </div>
                     ))}
@@ -378,38 +519,79 @@ const VerdictRAG = () => {
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   onKeyPress={(e) => e.key === 'Enter' && handleChatSubmit()}
-                  placeholder="Ask a question about the case..."
+                  placeholder="Ask about the document... (e.g., 'What is the main issue?', 'Who are the parties involved?')"
                   className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-full"
                 />
                 <button
                   onClick={handleChatSubmit}
-                  disabled={!chatInput.trim()}
+                  disabled={!chatInput.trim() || !documentStats}
                   className="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
                 >
-                  Send
+                  Query
                 </button>
               </div>
             </div>
           )}
 
-          {/* Glossary Tab */}
-          {activeTab === 'glossary' && (
+          {/* Chunks Tab */}
+          {activeTab === 'chunks' && (
             <div className="space-y-6 w-full">
-              <h2 className="text-2xl font-bold text-gray-800 mb-4">Legal Terms Explained</h2>
+              <h2 className="text-2xl font-bold text-gray-800 mb-4">Document Chunks</h2>
               
-              {analysis?.legalTerms ? (
-                <div className="space-y-4 w-full">
-                  {analysis.legalTerms.map((term, index) => (
-                    <div key={index} className="bg-white border border-gray-200 rounded-xl p-6 w-full">
-                      <h4 className="text-lg font-semibold text-blue-900 mb-2">{term.term}</h4>
-                      <p className="text-gray-700">{term.definition}</p>
+              {chunks ? (
+                <div className="space-y-4">
+                  <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                      <div>
+                        <p className="text-blue-600 font-medium">Total Chunks</p>
+                        <p className="text-blue-800">{chunks.total_chunks}</p>
+                      </div>
+                      <div>
+                        <p className="text-blue-600 font-medium">Chunk Size</p>
+                        <p className="text-blue-800">{chunks.chunk_size} words</p>
+                      </div>
+                      <div>
+                        <p className="text-blue-600 font-medium">Overlap</p>
+                        <p className="text-blue-800">{chunks.chunk_overlap} words</p>
+                      </div>
+                      <div>
+                        <p className="text-blue-600 font-medium">Showing</p>
+                        <p className="text-blue-800">{chunks.sample_chunks?.length || 0} samples</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {chunks.sample_chunks?.map((chunk, index) => (
+                    <div key={index} className="bg-white border border-gray-200 rounded-xl p-6">
+                      <div className="flex items-center justify-between mb-3">
+                        <h4 className="text-lg font-semibold text-gray-800">
+                          Chunk {chunk.id}
+                        </h4>
+                        <div className="text-sm text-gray-500">
+                          {chunk.word_count} words • {chunk.length} chars
+                        </div>
+                      </div>
+                      <p className="text-gray-700 leading-relaxed">
+                        {chunk.preview}
+                      </p>
                     </div>
                   ))}
                 </div>
+              ) : documentStats ? (
+                <div className="text-center py-12">
+                  <button
+                    onClick={getChunksInfo}
+                    className="bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2 mx-auto"
+                  >
+                    <Database size={20} />
+                    Load Chunks Information
+                  </button>
+                </div>
               ) : (
                 <div className="text-center py-12 text-gray-500">
-                  <Book size={48} className="mx-auto mb-4 opacity-50" />
-                  <p>Legal terms will appear here after analyzing a case</p>
+                  <Database size={48} className="mx-auto mb-4 opacity-50" />
+                  <p>Document chunks will appear here after processing</p>
+                  <p className="text-sm mt-2">Upload a document to see how it's chunked for RAG</p>
                 </div>
               )}
             </div>
