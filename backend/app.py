@@ -36,14 +36,14 @@ class TrueRAGVERDICT:
         self.vector_store = None
         self.chunks = []
         self.chunk_embeddings = None
-        self.chunk_size = 512
-        self.chunk_overlap = 50
+        self.chunk_size = 400  # Reduced for better semantic coherence
+        self.chunk_overlap = 80  # Increased overlap
         self.initialize_models()
    
     def initialize_models(self):
         """Initialize RAG models and components"""
         try:
-            print("Initializing True RAG VERDICTRAg models...")
+            print("Initializing True RAG VERDICT models...")
            
             # Sentence transformer for embeddings (RAG component)
             self.sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
@@ -80,7 +80,7 @@ class TrueRAGVERDICT:
         try:
             with pdfplumber.open(file) as pdf:
                 text = ''
-                max_pages = min(100, len(pdf.pages))  # Increased for better coverage
+                max_pages = min(100, len(pdf.pages))
                
                 for page_num in range(max_pages):
                     page = pdf.pages[page_num]
@@ -88,7 +88,7 @@ class TrueRAGVERDICT:
                     if page_text:
                         text += f"\n{page_text}"
                
-                # Clean the text
+                # Clean the text but preserve content
                 text = self.clean_legal_text(text)
                 logger.info(f"Extracted {len(text)} characters from {max_pages} pages")
                 return text
@@ -98,11 +98,17 @@ class TrueRAGVERDICT:
             return None
    
     def clean_legal_text(self, text):
-        """Clean legal document text"""
-        # Remove excessive whitespace and normalize
+        """Clean legal document text - LESS aggressive cleaning"""
+        # Remove excessive whitespace but preserve structure
         text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
         text = re.sub(r'[ \t]+', ' ', text)
-        text = re.sub(r'[^\w\s.,;:!?()\-\'""/]', ' ', text)
+        
+        # Remove only clearly problematic characters, keep legal punctuation
+        text = re.sub(r'[^\w\s.,;:!?()\-\'""/\[\]{}@#$%&*+=<>|\\`~]', ' ', text)
+        
+        # Remove excessive spaces
+        text = re.sub(r' +', ' ', text)
+        
         return text.strip()
    
     def chunk_document(self, text: str) -> List[Dict]:
@@ -110,89 +116,123 @@ class TrueRAGVERDICT:
         RAG Step 1: Chunk the legal document into overlapping segments
         """
         try:
-            # Sentence-based chunking for better semantic coherence
+            # First try sentence-based chunking
             sentences = sent_tokenize(text)
             chunks = []
             chunk_id = 0
            
             current_chunk = ""
-            current_sentences = []
+            current_word_count = 0
            
             for i, sentence in enumerate(sentences):
-                # Clean sentence
                 sentence = sentence.strip()
-                if not sentence:
+                if len(sentence) < 10:  # Skip very short sentences
                     continue
-                    
-                # Add sentence to current chunk
-                test_chunk = current_chunk + " " + sentence if current_chunk else sentence
-               
-                # Check if chunk exceeds size limit
-                if len(test_chunk.split()) > self.chunk_size:
-                    if current_chunk:  # Save current chunk
+                
+                sentence_words = len(sentence.split())
+                
+                # Check if adding this sentence would exceed chunk size
+                if current_word_count + sentence_words > self.chunk_size and current_chunk:
+                    # Save current chunk if it has substantial content
+                    if current_word_count > 50:  # Minimum chunk size
                         chunks.append({
                             'id': chunk_id,
                             'text': current_chunk.strip(),
-                            'sentences': current_sentences.copy(),
-                            'start_sentence': i - len(current_sentences),
-                            'end_sentence': i - 1
+                            'word_count': current_word_count,
+                            'sentence_start': max(0, i - current_word_count // 20),
+                            'sentence_end': i
                         })
                         chunk_id += 1
-                   
+                    
                     # Start new chunk with overlap
-                    overlap_sentences = current_sentences[-self.chunk_overlap:] if len(current_sentences) > self.chunk_overlap else current_sentences
-                    current_chunk = " ".join(overlap_sentences) + " " + sentence
-                    current_sentences = overlap_sentences + [sentence]
+                    overlap_text = ""
+                    if len(chunks) > 0:
+                        # Take last part of previous chunk as overlap
+                        prev_words = current_chunk.split()
+                        if len(prev_words) > self.chunk_overlap:
+                            overlap_text = " ".join(prev_words[-self.chunk_overlap:]) + " "
+                    
+                    current_chunk = overlap_text + sentence
+                    current_word_count = len(current_chunk.split())
                 else:
-                    current_chunk = test_chunk
-                    current_sentences.append(sentence)
+                    # Add sentence to current chunk
+                    if current_chunk:
+                        current_chunk += " " + sentence
+                    else:
+                        current_chunk = sentence
+                    current_word_count = len(current_chunk.split())
            
             # Add final chunk
-            if current_chunk.strip():
+            if current_chunk.strip() and current_word_count > 50:
                 chunks.append({
                     'id': chunk_id,
                     'text': current_chunk.strip(),
-                    'sentences': current_sentences,
-                    'start_sentence': len(sentences) - len(current_sentences),
-                    'end_sentence': len(sentences) - 1
+                    'word_count': current_word_count,
+                    'sentence_start': len(sentences) - current_word_count // 20,
+                    'sentence_end': len(sentences)
                 })
            
-            # Filter out empty chunks
-            chunks = [chunk for chunk in chunks if chunk['text'].strip()]
+            # Fallback to word-based chunking if sentence chunking fails
+            if len(chunks) < 5:
+                logger.warning("Sentence chunking produced few chunks, falling back to word-based chunking")
+                chunks = self.word_based_chunking(text)
            
-            logger.info(f"Document chunked into {len(chunks)} segments")
-            return chunks
+            # Final validation - remove empty chunks
+            valid_chunks = []
+            for chunk in chunks:
+                if chunk['text'].strip() and len(chunk['text'].split()) > 20:
+                    valid_chunks.append(chunk)
+           
+            logger.info(f"Document chunked into {len(valid_chunks)} valid segments")
+            return valid_chunks
            
         except Exception as e:
             logger.error(f"Error chunking document: {e}")
-            # Fallback: simple word-based chunking
-            words = text.split()
-            chunks = []
-            for i in range(0, len(words), self.chunk_size - self.chunk_overlap):
-                chunk_words = words[i:i + self.chunk_size]
+            return self.word_based_chunking(text)
+    
+    def word_based_chunking(self, text: str) -> List[Dict]:
+        """Fallback word-based chunking"""
+        words = text.split()
+        chunks = []
+        
+        for i in range(0, len(words), self.chunk_size - self.chunk_overlap):
+            chunk_words = words[i:i + self.chunk_size]
+            if len(chunk_words) > 20:  # Minimum viable chunk
                 chunk_text = ' '.join(chunk_words)
-                if chunk_text.strip():  # Only add non-empty chunks
-                    chunks.append({
-                        'id': i // (self.chunk_size - self.chunk_overlap),
-                        'text': chunk_text,
-                        'word_start': i,
-                        'word_end': i + len(chunk_words)
-                    })
-            return chunks
+                chunks.append({
+                    'id': len(chunks),
+                    'text': chunk_text,
+                    'word_count': len(chunk_words),
+                    'word_start': i,
+                    'word_end': i + len(chunk_words)
+                })
+        
+        return chunks
    
     def create_embeddings(self, chunks: List[Dict]) -> np.ndarray:
         """
         RAG Step 2: Create sentence embeddings for all chunks
         """
         try:
-            # Filter out empty chunks before creating embeddings
-            valid_chunks = [chunk for chunk in chunks if chunk['text'].strip()]
+            # Double-check chunks have content
+            valid_chunks = []
+            for chunk in chunks:
+                text = chunk['text'].strip()
+                if text and len(text.split()) > 5:  # At least 5 words
+                    valid_chunks.append(chunk)
+                else:
+                    logger.warning(f"Skipping empty/short chunk: {chunk.get('id', 'unknown')}")
+            
             if not valid_chunks:
                 logger.error("No valid chunks found for embedding creation")
                 return None
-                
+            
+            # Update chunks list to only include valid ones
+            self.chunks = valid_chunks
+            
             texts = [chunk['text'] for chunk in valid_chunks]
             embeddings = self.sentence_model.encode(texts, show_progress_bar=True)
+            
             logger.info(f"Created embeddings for {len(valid_chunks)} chunks, shape: {embeddings.shape}")
             return embeddings
            
@@ -237,11 +277,12 @@ class TrueRAGVERDICT:
             # Retrieve relevant chunks with scores
             retrieved_chunks = []
             for i, (score, idx) in enumerate(zip(scores[0], indices[0])):
-                if idx >= 0 and idx < len(self.chunks):  # Valid index check
+                if idx >= 0 and idx < len(self.chunks):
                     chunk = self.chunks[idx].copy()
                     chunk['similarity_score'] = float(score)
                     chunk['rank'] = i + 1
                     retrieved_chunks.append(chunk)
+                    logger.info(f"Retrieved chunk {idx} (rank {i+1}) with score {score:.3f}: {chunk['text'][:100]}...")
            
             logger.info(f"Retrieved {len(retrieved_chunks)} relevant chunks for question: '{question[:50]}...'")
             return retrieved_chunks
@@ -265,26 +306,29 @@ class TrueRAGVERDICT:
                     "chunk_sources": []
                 }
            
-            # Combine top chunks as context (limit to avoid token overflow)
+            # Combine top chunks as context
             context_parts = []
             total_length = 0
-            max_context_length = 3000  # Leave room for question and model processing
+            max_context_length = 2500  # Conservative limit
            
             for chunk in retrieved_chunks:
                 chunk_text = chunk['text'].strip()
-                if not chunk_text:  # Skip empty chunks
+                
+                # Validate chunk has actual content
+                if not chunk_text or len(chunk_text.split()) < 5:
+                    logger.warning(f"Skipping invalid chunk: {chunk.get('id', 'unknown')}")
                     continue
-                    
+                
                 if total_length + len(chunk_text) < max_context_length:
-                    context_parts.append(f"[Chunk {chunk['rank']}]: {chunk_text}")
+                    context_parts.append(f"[Source {chunk['rank']}] {chunk_text}")
                     total_length += len(chunk_text)
+                    logger.info(f"Added chunk {chunk['id']} to context (length: {len(chunk_text)})")
                 else:
                     break
            
-            # Check if we have valid context
             if not context_parts:
                 return {
-                    "answer": "The retrieved document sections appear to be empty or contain no readable text.",
+                    "answer": "No readable content found in the relevant document sections.",
                     "confidence": 0.0,
                     "source_chunks": 0,
                     "retrieved_chunks": len(retrieved_chunks),
@@ -294,16 +338,18 @@ class TrueRAGVERDICT:
             
             combined_context = "\n\n".join(context_parts)
             
-            # Final check for empty context
-            if not combined_context.strip():
+            # Validate final context
+            if not combined_context.strip() or len(combined_context.split()) < 10:
                 return {
-                    "answer": "No readable content found in the relevant document sections.",
+                    "answer": "Retrieved context is too short or empty to generate a meaningful answer.",
                     "confidence": 0.0,
-                    "source_chunks": 0,
+                    "source_chunks": len(context_parts),
                     "retrieved_chunks": len(retrieved_chunks),
-                    "context_length": 0,
+                    "context_length": len(combined_context),
                     "chunk_sources": []
                 }
+           
+            logger.info(f"Final context length: {len(combined_context)} chars, {len(combined_context.split())} words")
            
             # Generate answer using QA model
             result = self.qa_model(question=question, context=combined_context)
@@ -320,9 +366,9 @@ class TrueRAGVERDICT:
                         "chunk_id": chunk['id'],
                         "rank": chunk['rank'],
                         "similarity_score": chunk['similarity_score'],
-                        "preview": chunk['text'][:100] + "..." if len(chunk['text']) > 100 else chunk['text']
+                        "preview": chunk['text'][:150] + "..." if len(chunk['text']) > 150 else chunk['text']
                     }
-                    for chunk in retrieved_chunks[:3]  # Top 3 sources
+                    for chunk in retrieved_chunks[:3]
                 ]
             }
            
@@ -351,12 +397,18 @@ class TrueRAGVERDICT:
             if not text or not text.strip():
                 logger.error("Input text is empty")
                 return False
+            
+            if len(text.split()) < 100:
+                logger.error("Input text is too short for meaningful chunking")
+                return False
            
             # Step 1: Chunk the document
             self.chunks = self.chunk_document(text)
             if not self.chunks:
                 logger.error("Failed to chunk document - no valid chunks created")
                 return False
+           
+            logger.info(f"Created {len(self.chunks)} chunks")
            
             # Step 2: Create embeddings
             self.chunk_embeddings = self.create_embeddings(self.chunks)
@@ -384,9 +436,10 @@ class TrueRAGVERDICT:
             if not self.vector_store or not self.chunks:
                 return {"error": "Document not processed. Please upload and process a document first."}
            
-            # Validate question
             if not question or not question.strip():
                 return {"error": "Question cannot be empty."}
+           
+            logger.info(f"Processing query: {question}")
            
             # Steps 4 & 5: Retrieve and generate
             retrieved_chunks = self.retrieve_relevant_chunks(question, k)
@@ -523,7 +576,7 @@ def rag_query():
             return jsonify({"error": "No question provided"}), 400
 
         question = data['question']
-        k = data.get('k', 5)  # Number of chunks to retrieve
+        k = data.get('k', 5)
 
         # Perform RAG query
         result = rag_verdict.rag_query(question, k)
@@ -564,7 +617,7 @@ def comprehensive_analysis():
                 key = question.split('?')[0].lower().replace(' ', '_')
                 analysis_results[key] = {
                     "question": question,
-                    "answer": result['answer'],
+                    "answer": rag_verdict.simplify_legal_language(result['answer']),
                     "confidence": result['confidence'],
                     "sources": result['rag_metadata']['chunk_sources']
                 }
@@ -575,7 +628,7 @@ def comprehensive_analysis():
                 "total_chunks": len(rag_verdict.chunks),
                 "embedding_dimension": rag_verdict.chunk_embeddings.shape[1] if rag_verdict.chunk_embeddings is not None else 0
             },
-            "system": "True RAG VERDICTRAg - Retrieval Augmented Generation"
+            "system": "True RAG VERDICT - Retrieval Augmented Generation"
         })
 
     except Exception as e:
@@ -590,7 +643,7 @@ def get_chunks():
             return jsonify({"error": "No document processed"}), 400
 
         chunk_info = []
-        for i, chunk in enumerate(rag_verdict.chunks[:10]):  # First 10 chunks
+        for i, chunk in enumerate(rag_verdict.chunks[:10]):
             chunk_info.append({
                 "id": chunk['id'],
                 "preview": chunk['text'][:200] + "..." if len(chunk['text']) > 200 else chunk['text'],
@@ -612,14 +665,14 @@ def get_chunks():
 @app.route("/health", methods=["GET"])
 def health_check():
     return jsonify({
-        "status": "True RAG VERDICTRAg Online",
-        "version": "6.0 - Retrieval Augmented Generation",
+        "status": "True RAG VERDICT Online",
+        "version": "6.1 - Fixed Retrieval Augmented Generation",
         "rag_components": {
-            "chunking": "✅ Semantic sentence-based chunking",
+            "chunking": "✅ Enhanced semantic sentence-based chunking",
             "embeddings": "✅ SentenceTransformer embeddings",
             "vector_store": "✅ FAISS similarity search",
-            "retrieval": "✅ Top-k chunk retrieval",
-            "generation": "✅ Context-aware QA"
+            "retrieval": "✅ Top-k chunk retrieval with validation",
+            "generation": "✅ Context-aware QA with content validation"
         },
         "models": {
             "sentence_model": rag_verdict.sentence_model is not None,
@@ -635,7 +688,7 @@ def health_check():
     })
 
 if __name__ == "__main__":
-    print("🚀 Starting True RAG VERDICTRAg - Retrieval Augmented Generation")
-    print("📊 RAG Pipeline: Chunking → Embeddings → Vector Store → Retrieval → Generation")
-    print("🔍 Features: FAISS Vector Search, Semantic Chunking, Context-Aware QA")
+    print("🚀 Starting True RAG VERDICT - Fixed Retrieval Augmented Generation")
+    print("📊 RAG Pipeline: Enhanced Chunking → Embeddings → Vector Store → Validated Retrieval → Generation")
+    print("🔍 Features: FAISS Vector Search, Content Validation, Semantic Chunking, Context-Aware QA")
     app.run(debug=True, port=5000)
